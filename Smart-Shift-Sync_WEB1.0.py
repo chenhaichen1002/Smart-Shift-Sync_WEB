@@ -12,7 +12,7 @@ CLIENT_CONFIG = {
         "client_secret": "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",
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["http://localhost:8501"] # 公開後はStreamlitのURLに変更してください
+        "redirect_uris": ["https://smart-shift-syncweb-mmahtfwspadpxywkmsxetf.streamlit.app/"] 
     }
 }
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
