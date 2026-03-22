@@ -72,12 +72,13 @@ st.title("🎢 Shift Sync Online")
 
 # セッション状態の初期化
 if "events" not in st.session_state: st.session_state.events = []
-if "auth_code" not in st.session_state: st.session_state.auth_code = None
+if "sync_ready" not in st.session_state: st.session_state.sync_ready = False
 
-# URLからcodeを取得して保持
-current_code = st.query_params.get("code")
-if current_code:
-    st.session_state.auth_code = current_code
+# URLパラメータからcodeを取得（一度だけ処理）
+auth_code = st.query_params.get("code")
+if auth_code and not st.session_state.sync_ready:
+    st.session_state.auth_code = auth_code
+    st.session_state.sync_ready = True
 
 with st.sidebar:
     st.header("⚙️ 設定")
@@ -105,18 +106,17 @@ with tab2:
     if not st.session_state.events:
         st.info("先に解析を完了させてください。")
     else:
+        # ステップ1: 認証
         flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
         auth_url, _ = flow.authorization_url(prompt='consent')
-
-        # ステップ1: 認証ボタン
         st.link_button("1. Googleで認証する", auth_url, use_container_width=True)
 
-        # ステップ2: 同期実行（codeが保持されている場合のみ表示）
-        if st.session_state.auth_code:
-            st.success("✅ 認証を確認しました。")
-            if st.button("2. カレンダーに同期を実行", type="primary", use_container_width=True):
+        # ステップ2: 同期実行
+        if st.session_state.sync_ready:
+            st.success("✅ 認証が完了しました。")
+            if st.button("2. カレンダーに同期を開始", type="primary", use_container_width=True):
                 try:
-                    with st.spinner("同期中..."):
+                    with st.spinner("書き込み中..."):
                         flow.fetch_token(code=st.session_state.auth_code)
                         service = build("calendar", "v3", credentials=flow.credentials)
                         for e in st.session_state.events:
@@ -125,12 +125,14 @@ with tab2:
                                 "start": {"dateTime": e["start"].isoformat(), "timeZone": "Asia/Tokyo"},
                                 "end": {"dateTime": e["end"].isoformat(), "timeZone": "Asia/Tokyo"},
                             }).execute()
-                        st.success("完了しました！")
+                        st.success("同期が成功しました！")
                         st.balloons()
-                        # 使用済みコードをクリア
-                        st.session_state.auth_code = None
+                        # 完了後はフラグを折って再実行を防ぐ
+                        st.session_state.sync_ready = False
                         st.query_params.clear()
                 except Exception as ex:
-                    st.error("認証の有効期限が切れた可能性があります。もう一度手順1からやり直してください。")
-                    st.session_state.auth_code = None
+                    st.error("認証コードが無効になりました。もう一度手順1からやり直してください。")
+                    st.session_state.sync_ready = False
                     st.query_params.clear()
+        else:
+            st.info("認証ボタンを押して、このアプリに戻ってきてください。")
