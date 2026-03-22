@@ -17,7 +17,7 @@ CLIENT_CONFIG = {
 }
 SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
-# --- 解析・給与計算ロジック ---
+# --- 解析ロジック (既存のものを流用) ---
 def parse_schedule_text(year, text):
     events = []
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
@@ -55,69 +55,53 @@ def parse_schedule_text(year, text):
         i += 1
     return events
 
-def calc_pay(events, wage):
-    total = 0.0
-    for e in events:
-        total += e["hours"] * wage
-        curr = e["start"]
-        while curr < e["end"]:
-            if curr.hour >= 22 or curr.hour < 5:
-                total += (0.25 / 4) * wage
-            curr += timedelta(minutes=15)
-    return int(total)
+# --- 認証Flowのキャッシュ管理 (これが重要) ---
+@st.cache_resource
+def get_flow():
+    return Flow.from_client_config(
+        CLIENT_CONFIG, 
+        scopes=SCOPES, 
+        redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0]
+    )
 
-# --- UI設定 ---
+# --- UI ---
 st.set_page_config(page_title="Shift Sync", page_icon="📅")
 st.title("🎢 Shift Sync Online")
 
-# セッション状態の初期化
+# セッション管理
 if "events" not in st.session_state: st.session_state.events = []
-if "sync_ready" not in st.session_state: st.session_state.sync_ready = False
 
-# URLパラメータからcodeを取得（一度だけ処理）
-auth_code = st.query_params.get("code")
-if auth_code and not st.session_state.sync_ready:
-    st.session_state.auth_code = auth_code
-    st.session_state.sync_ready = True
-
-with st.sidebar:
-    st.header("⚙️ 設定")
-    hourly_wage = st.number_input("時給 (円)", value=1290)
-    target_year = st.number_input("対象年", value=datetime.now().year)
+# パラメータ取得
+query_params = st.query_params
+auth_code = query_params.get("code")
 
 tab1, tab2 = st.tabs(["📋 解析", "🚀 同期"])
 
 with tab1:
-    raw_data = st.text_area("内容を貼り付けてください", height=250)
+    raw_data = st.text_area("内容を貼り付けてください", height=200)
     if raw_data:
-        st.session_state.events = parse_schedule_text(target_year, raw_data)
+        st.session_state.events = parse_schedule_text(datetime.now().year, raw_data)
         if st.session_state.events:
-            p = calc_pay(st.session_state.events, hourly_wage)
-            h = sum(e['hours'] for e in st.session_state.events)
-            st.metric("概算給与", f"¥{p:,}")
-            st.metric("総労働時間", f"{h:.2f}h")
-            st.dataframe(pd.DataFrame([{
-                "日付": e["start"].strftime("%m/%d"),
-                "内容": e["subject"],
-                "実働": f"{e['hours']}h"
-            } for e in st.session_state.events]), use_container_width=True)
+            st.success(f"{len(st.session_state.events)}件解析完了")
+            st.dataframe(pd.DataFrame([{"日付": e["start"].strftime("%m/%d"), "内容": e["subject"]} for e in st.session_state.events]))
 
 with tab2:
     if not st.session_state.events:
-        st.info("先に解析を完了させてください。")
+        st.info("解析を先にしてください")
     else:
-        # ステップ1: 認証
-        flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
-        auth_url, _ = flow.authorization_url(prompt='consent')
-        st.link_button("1. Googleで認証する", auth_url, use_container_width=True)
-
-        # ステップ2: 同期実行
-        if st.session_state.sync_ready:
-            st.success("✅ 認証が完了しました。")
-            if st.button("2. カレンダーに同期を開始", type="primary", use_container_width=True):
+        flow = get_flow()
+        
+        # 状況に応じた表示切り替え
+        if not auth_code:
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            st.write("手順1: Googleで許可を与えてください")
+            st.link_button("🔑 Google認証を開始", auth_url, use_container_width=True)
+        else:
+            st.success("✅ 認証コードを取得しました！")
+            if st.button("手順2: カレンダーに同期を実行", type="primary", use_container_width=True):
                 try:
-                    with st.spinner("書き込み中..."):
-                        flow.fetch_token(code=st.session_state.auth_code)
+                    with st.spinner("同期中..."):
+                        flow.fetch_token(code=auth_code)
                         service = build("calendar", "v3", credentials=flow.credentials)
                         for e in st.session_state.events:
                             service.events().insert(calendarId="primary", body={
@@ -125,14 +109,9 @@ with tab2:
                                 "start": {"dateTime": e["start"].isoformat(), "timeZone": "Asia/Tokyo"},
                                 "end": {"dateTime": e["end"].isoformat(), "timeZone": "Asia/Tokyo"},
                             }).execute()
-                        st.success("同期が成功しました！")
-                        st.balloons()
-                        # 完了後はフラグを折って再実行を防ぐ
-                        st.session_state.sync_ready = False
-                        st.query_params.clear()
-                except Exception as ex:
-                    st.error("認証コードが無効になりました。もう一度手順1からやり直してください。")
-                    st.session_state.sync_ready = False
+                    st.success("成功！カレンダーを確認してください。")
+                    st.balloons()
                     st.query_params.clear()
-        else:
-            st.info("認証ボタンを押して、このアプリに戻ってきてください。")
+                except Exception as e:
+                    st.error(f"エラー: 再度『認証を開始』からやり直してください。")
+                    st.query_params.clear()
