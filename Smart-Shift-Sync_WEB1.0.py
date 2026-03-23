@@ -1,117 +1,135 @@
-import streamlit as st
-import re
-import pandas as pd
-from datetime import datetime, timedelta
-from google_auth_oauthlib.flow import Flow
-from googleapiclient.discovery import build
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Shift Sync</title>
+    <style>
+        :root {
+            --primary-color: #0073e6;
+            --accent-color: #2ecc71;
+            --bg-color: #f4f7f9;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            line-height: 1.6;
+        }
+        header {
+            background: var(--primary-color);
+            color: white;
+            padding: 1rem;
+            text-align: center;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+        main {
+            padding: 15px;
+            max-width: 600px; /* スマホで見やすい幅に制限 */
+            margin: 0 auto;
+        }
+        section {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+        h2 {
+            color: var(--primary-color);
+            font-size: 1.25rem;
+            border-bottom: 2px solid var(--bg-color);
+            padding-bottom: 10px;
+            margin-top: 0;
+        }
+        /* ワークフローの改善（番号付き） */
+        .step-box {
+            background: #eef6ff;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border-left: 4px solid var(--primary-color);
+        }
+        .app-link {
+            display: block;
+            background: var(--primary-color);
+            color: white;
+            text-align: center;
+            padding: 12px;
+            text-decoration: none;
+            border-radius: 8px;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        .salary-info {
+            background: #fff9db;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.9em;
+        }
+        footer {
+            text-align: center;
+            padding: 20px;
+            font-size: 0.8rem;
+            color: #666;
+        }
+        /* スマホ向け調整 */
+        @media (max-width: 480px) {
+            h1 { font-size: 1.5rem; }
+            section { padding: 15px; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Smart Shift Sync</h1>
+    </header>
+    <main>
+        <section>
+            <h2>ご利用の流れ (改善版)</h2>
+            <p>同期ミスを防ぐため、以下の手順で操作してください：</p>
+            <div class="step-box">
+                <strong>Step 1: Google認証</strong><br>
+                最初にカレンダーへの書き込み権限を許可します。
+            </div>
+            <div class="step-box">
+                <strong>Step 2: シフト解析</strong><br>
+                ポータルのテキストを貼り付けて解析を実行します。
+            </div>
+            <div class="step-box">
+                <strong>Step 3: 同期完了</strong><br>
+                解析されたポジション・給与を確認して同期。
+            </div>
+        </section>
 
-# --- 設定 ---
-CLIENT_CONFIG = {
-    "web": {
-        "client_id": "721743236712-giicql65qcqqli90lhit6th8omoqtndl.apps.googleusercontent.com",
-        "client_secret": "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",
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uris": ["https://smart-shift-syncweb-mmahtfwspadpxywkmsxetf.streamlit.app/"]
-    }
-}
-SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
+        <section>
+            <h2>アップデート機能</h2>
+            <ul>
+                <li><strong>ポジション解析:</strong> 担当業務（レジ、品出し、イベント等）を自動判別し、カレンダーのタイトルに反映。</li>
+                <li><strong>給与シミュレーション:</strong> 
+                    <div class="salary-info">
+                        時給設定に基づき、深夜手当(25%)や残業代を自動計算。概算給与を同期前に確認可能。
+                    </div>
+                </li>
+            </ul>
+        </section>
 
-# --- 解析ロジック (既存のものを流用) ---
-def parse_schedule_text(year, text):
-    events = []
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    date_re = re.compile(r"(\d{1,2})/(\d{1,2})\([^)]+\)")
-    time_re = re.compile(r"(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})")
-    work_h_re = re.compile(r"\((\d+)h(\d*)m?\)")
-    i = 0
-    while i < len(lines):
-        date_m = date_re.search(lines[i])
-        if date_m:
-            month, day = map(int, date_m.groups())
-            start_t, end_t, work_h, pos = None, None, 0.0, ""
-            j = i + 1
-            while j < len(lines) and not date_re.search(lines[j]):
-                line = lines[j]
-                tm = time_re.search(line)
-                if tm and "[休" not in line:
-                    start_t, end_t = tm.groups()
-                    h_match = work_h_re.search(line)
-                    if h_match:
-                        h = int(h_match.group(1))
-                        m = int(h_match.group(2)) if h_match.group(2).isdigit() else 0
-                        work_h = h + (m / 60.0)
-                elif not any(x in line for x in ["休", "メイン", "Ver", "シフト"]):
-                    if not pos: pos = line
-                j += 1
-            if start_t:
-                try:
-                    s_dt = datetime(year, month, day, *map(int, start_t.split(":")))
-                    e_dt = datetime(year, month, day, *map(int, end_t.split(":")))
-                    if e_dt <= s_dt: e_dt += timedelta(days=1)
-                    events.append({"subject": pos if pos else "勤務", "start": s_dt, "end": e_dt, "hours": work_h})
-                except: pass
-            i = j - 1
-        i += 1
-    return events
+        <section>
+            <h2>アプリを起動する</h2>
+            <a href="https://smart-shift-syncweb-mmahtfwspadpxywkmsxetf.streamlit.app/" class="app-link">Shift Sync Online (Web版)</a>
+            <a href="https://github.com/chenhaichen1002/Smart-Shift-Sync_GUI" style="color:var(--primary-color); display:block; text-align:center;">Windows GUI版はこちら</a>
+        </section>
 
-# --- 認証Flowのキャッシュ管理 (これが重要) ---
-@st.cache_resource
-def get_flow():
-    return Flow.from_client_config(
-        CLIENT_CONFIG, 
-        scopes=SCOPES, 
-        redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0]
-    )
-
-# --- UI ---
-st.set_page_config(page_title="Shift Sync", page_icon="📅")
-st.title("🎢 Shift Sync Online")
-
-# セッション管理
-if "events" not in st.session_state: st.session_state.events = []
-
-# パラメータ取得
-query_params = st.query_params
-auth_code = query_params.get("code")
-
-tab1, tab2 = st.tabs(["📋 解析", "🚀 同期"])
-
-with tab1:
-    raw_data = st.text_area("内容を貼り付けてください", height=200)
-    if raw_data:
-        st.session_state.events = parse_schedule_text(datetime.now().year, raw_data)
-        if st.session_state.events:
-            st.success(f"{len(st.session_state.events)}件解析完了")
-            st.dataframe(pd.DataFrame([{"日付": e["start"].strftime("%m/%d"), "内容": e["subject"]} for e in st.session_state.events]))
-
-with tab2:
-    if not st.session_state.events:
-        st.info("解析を先にしてください")
-    else:
-        flow = get_flow()
-        
-        # 状況に応じた表示切り替え
-        if not auth_code:
-            auth_url, _ = flow.authorization_url(prompt='consent')
-            st.write("手順1: Googleで許可を与えてください")
-            st.link_button("🔑 Google認証を開始", auth_url, use_container_width=True)
-        else:
-            st.success("✅ 認証コードを取得しました！")
-            if st.button("手順2: カレンダーに同期を実行", type="primary", use_container_width=True):
-                try:
-                    with st.spinner("同期中..."):
-                        flow.fetch_token(code=auth_code)
-                        service = build("calendar", "v3", credentials=flow.credentials)
-                        for e in st.session_state.events:
-                            service.events().insert(calendarId="primary", body={
-                                "summary": e["subject"],
-                                "start": {"dateTime": e["start"].isoformat(), "timeZone": "Asia/Tokyo"},
-                                "end": {"dateTime": e["end"].isoformat(), "timeZone": "Asia/Tokyo"},
-                            }).execute()
-                    st.success("成功！カレンダーを確認してください。")
-                    st.balloons()
-                    st.query_params.clear()
-                except Exception as e:
-                    st.error(f"エラー: 再度『認証を開始』からやり直してください。")
-                    st.query_params.clear()
+        <section>
+            <h2>開発中の新機能</h2>
+            <p><strong>Smart-Shift-change:</strong> <br>交代希望時の連絡ミスを防ぐ、スタッフ間確認ツールを開発検討中です。</p>
+        </section>
+    </main>
+    <footer>
+        <p>&copy; 2026 Chen - Smart Shift Sync<br>Developed for efficiency and accuracy.</p>
+    </footer>
+</body>
+</html>
