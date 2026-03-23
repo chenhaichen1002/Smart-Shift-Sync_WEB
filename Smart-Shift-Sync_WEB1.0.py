@@ -1,134 +1,126 @@
 import streamlit as st
 import re
+import pandas as pd
 from datetime import datetime, timedelta
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
 
-# --- ページ設定 (スマホ対応) ---
-st.set_page_config(
-    page_title="Smart Shift Sync",
-    page_icon="📅",
-    layout="centered", # スマホで中央に収まるように
-    initial_sidebar_state="collapsed"
-)
+# --- 設定 ---
+CLIENT_CONFIG = {
+    "web": {
+        "client_id": "721743236712-giicql65qcqqli90lhit6th8omoqtndl.apps.googleusercontent.com",
+        "client_secret": "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",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "redirect_uris": ["https://smart-shift-syncweb-mmahtfwspadpxywkmsxetf.streamlit.app/"]
+    }
+}
+SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
-# --- カスタムCSS (スマホ最適化) ---
+# --- 解析・給与計算ロジック (ポジション解析強化) ---
+def parse_schedule_text(year, text):
+    events = []
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    date_re = re.compile(r"(\d{1,2})/(\d{1,2})\([^)]+\)")
+    time_re = re.compile(r"(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})")
+    work_h_re = re.compile(r"\((\d+)h(\d*)m?\)")
+
+    i = 0
+    while i < len(lines):
+        date_m = date_re.search(lines[i])
+        if date_m:
+            month, day = map(int, date_m.groups())
+            start_t, end_t, work_h, pos = None, None, 0.0, ""
+            j = i + 1
+            while j < len(lines) and not date_re.search(lines[j]):
+                line = lines[j]
+                tm = time_re.search(line)
+                if tm and "[休" not in line:
+                    start_t, end_t = tm.groups()
+                    h_match = work_h_re.search(line)
+                    if h_match:
+                        h = int(h_match.group(1))
+                        m = int(h_match.group(2)) if h_match.group(2).isdigit() else 0
+                        work_h = h + (m / 60.0)
+                # ポジション（DKM L等）を確実に拾うロジック
+                elif not any(x in line for x in ["休", "メイン", "Ver", "シフト", "ログアウト"]):
+                    if line and not pos: 
+                        pos = line # 最初に見つかった単語をポジションとする
+                j += 1
+            
+            if start_t:
+                try:
+                    s_dt = datetime(year, month, day, *map(int, start_t.split(":")))
+                    e_dt = datetime(year, month, day, *map(int, end_t.split(":")))
+                    if e_dt <= s_dt: e_dt += timedelta(days=1)
+                    events.append({"subject": pos if pos else "勤務", "start": s_dt, "end": e_dt, "hours": work_h})
+                except: pass
+            i = j - 1
+        i += 1
+    return events
+
+def calc_pay(events, wage):
+    total = 0.0
+    for e in events:
+        total += e["hours"] * wage
+        curr = e["start"]
+        while curr < e["end"]:
+            if curr.hour >= 22 or curr.hour < 5:
+                total += (0.25 / 4) * wage # 深夜手当 0.25倍
+            curr += timedelta(minutes=15)
+    return int(total)
+
+# --- UI設定 ---
+st.set_page_config(page_title="Shift Sync", layout="centered")
+
+# スマホ向けCSS調整
 st.markdown("""
     <style>
-    .main { max-width: 600px; margin: 0 auto; }
-    .stButton>button { width: 100%; border-radius: 10px; height: 3em; background-color: #0073e6; color: white; }
-    .salary-box { background-color: #f0f8ff; padding: 15px; border-radius: 10px; border: 1px solid #0073e6; }
-    @media (max-width: 480px) {
-        h1 { font-size: 1.5rem !important; }
-        .stMarkdown { font-size: 0.9rem; }
-    }
+    .stMetric { background-color: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom: 10px; }
+    .stButton button { width: 100%; height: 3.5rem; font-weight: bold; }
+    textarea { font-size: 16px !important; } /* スマホのズーム防止 */
     </style>
     """, unsafe_allow_html=True)
 
-# --- ロジック関数 ---
+st.title("🎢 Shift Sync Online")
 
-def calculate_salary(start_str, end_str, hourly_wage):
-    """深夜手当(22:00-05:00)を考慮した給与計算"""
-    fmt = "%H:%M"
-    start = datetime.strptime(start_str, fmt)
-    end = datetime.strptime(end_str, fmt)
-    
-    # 終了が開始より前（深夜またぎ）の場合の日時調整
-    if end <= start:
-        end += timedelta(days=1)
-    
-    total_hours = (end - start).total_seconds() / 3600
-    
-    # 深夜時間帯の判定 (22:00 - 29:00として計算)
-    night_start = datetime.strptime("22:00", fmt)
-    night_end = datetime.strptime("05:00", fmt) + timedelta(days=1)
-    
-    overlap_start = max(start, night_start)
-    overlap_end = min(end, night_end)
-    
-    night_hours = max(0, (overlap_end - overlap_start).total_seconds() / 3600)
-    normal_hours = total_hours - night_hours
-    
-    salary = (normal_hours * hourly_wage) + (night_hours * hourly_wage * 1.25)
-    return int(salary), total_hours
+# セッション状態
+if "events" not in st.session_state: st.session_state.events = []
+if "creds" not in st.session_state: st.session_state.creds = None
 
-def parse_shift_text(text):
-    """テキストから時間とポジションを抽出"""
-    # 例: "10:00-19:00 [レジ]" または "10:00〜19:00 レジ"
-    pattern = r"(\d{1,2}:\d{2})[-〜](\d{1,2}:\d{2})\s*\[?(.*?)\]?$"
-    lines = text.strip().split('\n')
-    results = []
-    
-    for line in lines:
-        match = re.search(pattern, line.strip())
-        if match:
-            results.append({
-                "start": match.group(1),
-                "end": match.group(2),
-                "pos": match.group(3) if match.group(3) else "勤務"
-            })
-    return results
+# --- 新しい流れ：1. Google権限請求 ---
+flow = Flow.from_client_config(CLIENT_CONFIG, scopes=SCOPES, redirect_uri=CLIENT_CONFIG["web"]["redirect_uris"][0])
+auth_code = st.query_params.get("code")
 
-# --- メインUI ---
+if not st.session_state.creds:
+    if not auth_code:
+        st.warning("⚠️ 最初にGoogle連携が必要です")
+        auth_url, _ = flow.authorization_url(prompt='consent')
+        st.link_button("🔑 Googleアカウントを認証", auth_url, type="primary")
+        st.stop() # 認証されるまで下の画面を出さない
+    else:
+        try:
+            flow.fetch_token(code=auth_code)
+            st.session_state.creds = flow.to_json() # メモリに保持
+            st.query_params.clear()
+            st.rerun()
+        except:
+            st.error("認証エラー。再度お試しください。")
+            st.query_params.clear()
+            st.stop()
 
-st.title("🚀 Smart Shift Sync")
+# --- 2. 解析・給与計算セクション ---
+st.success("✅ Google認証済み")
 
-# セッション状態でログイン管理 (ダミーフラグ)
-if 'google_auth' not in st.session_state:
-    st.session_state.google_auth = False
+with st.expander("⚙️ 時給設定", expanded=False):
+    hourly_wage = st.number_input("時給 (円)", value=1290)
+    target_year = st.number_input("年", value=datetime.now().year)
 
-# STEP 1: Google認証 (未認証の場合)
-if not st.session_state.google_auth:
-    st.subheader("Step 1: Googleカレンダー連携")
-    st.info("同期を開始するには、まずGoogleアカウントの権限を許可してください。")
-    
-    if st.button("Googleアカウントでログイン"):
-        # 本来はここでGoogle OAuthのURLへリダイレクト
-        # 今回はテスト用にフラグをTrueにする処理
-        st.session_state.google_auth = True
-        st.rerun()
+raw_data = st.text_area("シフト内容を貼り付け", height=200, placeholder="3/1(Su)...")
 
-# STEP 2: 解析 & 同期 (認証済みの場合)
-else:
-    st.subheader("Step 2: シフト解析")
-    
-    with st.expander("設定", expanded=False):
-        wage = st.number_input("時給設定 (円)", value=1200, step=10)
-    
-    input_data = st.text_area("シフトを貼り付けてください", placeholder="例: 10:00-19:00 [レジ]", height=150)
-    
-    if input_data:
-        shifts = parse_shift_text(input_data)
-        
-        if shifts:
-            st.write("### 解析結果")
-            total_est_salary = 0
-            
-            for s in shifts:
-                salary, hours = calculate_salary(s['start'], s['end'], wage)
-                total_est_salary += salary
-                
-                with st.container():
-                    st.markdown(f"**{s['pos']}** | {s['start']} - {s['end']} ({hours}h)")
-                    st.caption(f"概算給与: ¥{salary:,}")
-                    st.divider()
-            
-            st.markdown(f"""
-                <div class="salary-box">
-                    <strong>合計見込み給与: ¥{total_est_salary:,}</strong><br>
-                    <small>※深夜手当(25%)を含む概算です。</small>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            if st.button("Googleカレンダーに同期する"):
-                with st.spinner("同期中..."):
-                    # ここにGoogle Calendar APIへの登録ロジックを記述
-                    st.success("同期が完了しました！カレンダーを確認してください。")
-                    
-        else:
-            st.warning("シフトの形式が解析できませんでした。")
-
-    if st.button("ログアウト / 権限解除"):
-        st.session_state.google_auth = False
-        st.rerun()
-
-st.divider()
-st.caption("© 2026 Chen - Smart Shift Sync (Web v1.1)")
+if raw_data:
+    st.session_state.events = parse_schedule_text(target_year, raw_data)
+    if st.session_state.events:
+        # 給与計算表示
+        pay = calc_pay(st.session_state.events, hourly_wage)
+        hrs = sum(e['hours'] for
