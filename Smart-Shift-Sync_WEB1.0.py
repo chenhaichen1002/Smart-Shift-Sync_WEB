@@ -8,8 +8,8 @@ from googleapiclient.discovery import build
 # --- 設定 ---
 CLIENT_CONFIG = {
     "web": {
-        "client_id": "721743236712-giicql65qcqqli90lhit6th8omoqtndl.apps.googleusercontent.com",
-        "client_secret": "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",
+        "client_id": "721743236712-16aqg21hlh912p9omnsrbba39f0b77qn.apps.googleusercontent.com",
+        "client_secret": "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",
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "redirect_uris": ["https://smart-shift-syncweb-mmahtfwspadpxywkmsxetf.streamlit.app/"]
